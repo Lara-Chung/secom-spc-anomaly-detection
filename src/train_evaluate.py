@@ -11,6 +11,7 @@ positive class. Every threshold is derived from training-period scores only.
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -19,7 +20,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from db import connect
+from db import connect, fetch
 from secom_data import OUTPUT_DIR
 
 SEED = 0
@@ -27,6 +28,7 @@ N_ESTIMATORS = 300
 N_BOOTSTRAP = 2000
 REFERENCE_C_GRID = (1.0, 0.1, 0.01, 0.001)  # inverse L2 strength, searched on train only
 REFERENCE_CV_SPLITS = 4
+MAX_MISSING_RATE = 0.5  # same sensor eligibility rule as sql/01_sensor_quality.sql
 
 # method -> role in the comparison
 METHODS = {
@@ -37,31 +39,53 @@ METHODS = {
 }
 
 
-def fetch(conn, query) -> pd.DataFrame:
-    cur = conn.execute(query)
-    return pd.DataFrame(cur.fetchall(), columns=[c.name for c in cur.description])
-
-
-def load() -> tuple[pd.DataFrame, np.ndarray]:
+def load() -> tuple[pd.DataFrame, np.ndarray, np.ndarray, list[int], list[int]]:
+    """Return run scores, the SQL-eligible sensors (X) and all 590 sensors (X_all),
+    plus the sensor ids behind each matrix's columns."""
     with connect() as conn:
-        features = fetch(conn, "SELECT run_id, sensor_values FROM feature_export ORDER BY ts, run_id")
         runs = fetch(conn, "SELECT * FROM spc_run_scores ORDER BY ts, run_id")
-    if not features["run_id"].equals(runs["run_id"]):
-        raise RuntimeError("feature_export and spc_run_scores are not aligned by run")
+        features = fetch(conn, "SELECT run_id, sensor_ids, sensor_values FROM feature_export ORDER BY ts, run_id")
+        features_all = fetch(conn, "SELECT run_id, sensor_ids, sensor_values FROM feature_export_all ORDER BY ts, run_id")
+    for name, frame in [("feature_export", features), ("feature_export_all", features_all)]:
+        if not frame["run_id"].equals(runs["run_id"]):
+            raise RuntimeError(f"{name} and spc_run_scores are not aligned by run")
     X = np.array(features["sensor_values"].tolist(), dtype=float)  # NULL -> NaN
-    return runs, X
+    X_all = np.array(features_all["sensor_values"].tolist(), dtype=float)
+    return runs, X, X_all, list(features["sensor_ids"][0]), list(features_all["sensor_ids"][0])
+
+
+class EligibleSensors(BaseEstimator, TransformerMixin):
+    """Drop sensors that are mostly missing or constant in the rows seen at fit time.
+
+    Same rule as sql/01_sensor_quality.sql, applied inside the pipeline so that a
+    cross-validation fold decides eligibility from its own fit rows only.
+    """
+
+    def fit(self, X, y=None):
+        X = np.asarray(X, dtype=float)
+        missing_rate = np.isnan(X).mean(axis=0)
+        n_distinct = np.array([len(np.unique(col[~np.isnan(col)])) for col in X.T])
+        self.keep_ = (missing_rate <= MAX_MISSING_RATE) & (n_distinct > 1)
+        return self
+
+    def transform(self, X):
+        return np.asarray(X, dtype=float)[:, self.keep_]
 
 
 def reference_pipeline(C: float):
-    """Supervised reference: median imputation, standardisation, L2 logistic regression."""
+    """Supervised reference: fold-local sensor eligibility, median imputation,
+    standardisation, L2 logistic regression."""
     return make_pipeline(
+        EligibleSensors(),
         SimpleImputer(strategy="median"),
         StandardScaler(),
         LogisticRegression(class_weight="balanced", C=C, max_iter=1000),
     )
 
 
-def score_runs(runs: pd.DataFrame, X: np.ndarray, reference_c: float = 1.0) -> pd.DataFrame:
+def score_runs(runs: pd.DataFrame, X: np.ndarray, X_all: np.ndarray, reference_c: float = 1.0) -> pd.DataFrame:
+    """X feeds the Isolation Forest (SQL-eligible sensors); X_all feeds the reference,
+    which selects sensors itself from the training rows."""
     train = (runs["split"] == "train").to_numpy()
     # No scaling: Isolation Forest picks split values between each feature's
     # min and max, so per-feature scale does not change the result
@@ -78,8 +102,8 @@ def score_runs(runs: pd.DataFrame, X: np.ndarray, reference_c: float = 1.0) -> p
     # Supervised reference: the only method that sees training labels. C comes
     # from select_reference_c (training-period CV); nothing else is searched
     reference = reference_pipeline(reference_c)
-    reference.fit(X[train], runs.loc[train, "is_fail"].astype(int))
-    scores["logistic_regression"] = reference.predict_proba(X)[:, 1]  # P(fail)
+    reference.fit(X_all[train], runs.loc[train, "is_fail"].astype(int))
+    scores["logistic_regression"] = reference.predict_proba(X_all)[:, 1]  # P(fail)
     return scores
 
 
@@ -149,11 +173,12 @@ def bootstrap_ap(scores: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return intervals, pd.DataFrame(diffs)
 
 
-def reference_cv(runs: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
+def reference_cv(runs: pd.DataFrame, X_all: np.ndarray) -> pd.DataFrame:
     """Out-of-fold AP of the supervised reference for each C in REFERENCE_C_GRID,
-    under a time-series split of the training period only. No test-period data."""
+    under a time-series split of the training period only. Sensor eligibility,
+    imputation and scaling are fitted on each fold's fit rows. No test-period data."""
     train = (runs["split"] == "train").to_numpy()
-    X_train = X[train]
+    X_train = X_all[train]
     y_train = runs.loc[train, "is_fail"].astype(int).to_numpy()
     rows = []
     for C in REFERENCE_C_GRID:
@@ -167,6 +192,7 @@ def reference_cv(runs: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
             rows.append({
                 "C": C,
                 "fold": fold,
+                "n_sensors": int(model[0].keep_.sum()),
                 "n_val": len(val_idx),
                 "n_fail_val": int(y_val.sum()),
                 "prevalence_val": y_val.mean(),
@@ -182,26 +208,35 @@ def select_reference_c(cv: pd.DataFrame) -> float:
 
 
 def main() -> None:
-    runs, X = load()
-    cv = reference_cv(runs, X)
+    runs, X, X_all, eligible_ids, all_ids = load()
+    # The Python rule fitted on the whole training period must reproduce the SQL
+    # eligibility list sensor by sensor, otherwise the two definitions have drifted
+    train = (runs["split"] == "train").to_numpy()
+    python_ids = list(np.array(all_ids)[EligibleSensors().fit(X_all[train]).keep_])
+    if python_ids != eligible_ids:
+        raise RuntimeError(f"Python eligibility keeps {len(python_ids)} sensors, SQL keeps "
+                           f"{len(eligible_ids)}, and the sets differ")
+    cv = reference_cv(runs, X_all)
     reference_c = select_reference_c(cv)
-    scores = score_runs(runs, X, reference_c)
+    scores = score_runs(runs, X, X_all, reference_c)
     metrics = evaluate(scores)
     intervals, diffs = bootstrap_ap(scores)
     is_test = metrics["split"] == "test"
     metrics.loc[is_test, ["ap_ci_low", "ap_ci_high"]] = intervals.loc[metrics.loc[is_test, "method"]].to_numpy()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    scores.to_csv(OUTPUT_DIR / "run_scores.csv", index=False)
+    scores.to_csv(OUTPUT_DIR / "run_scores.csv", index=False, float_format="%.12g")  # no last-digit churn
     # threshold is kept unrounded so that applying it to run_scores.csv reproduces tp/fp/fn/tn
     rounded = metrics.round({c: 4 for c in metrics.columns if c != "threshold"})
     rounded.to_csv(OUTPUT_DIR / "metrics.csv", index=False)
     diffs.round(4).to_csv(OUTPUT_DIR / "ap_differences.csv", index=False)
     cv.round(4).to_csv(OUTPUT_DIR / "reference_cv.csv", index=False)
     print(f"features: {X.shape[1]} sensors, train runs: {(runs['split'] == 'train').sum()}")
-    print("supervised reference: training-period CV mean out-of-fold AP by C")
+    print("supervised reference: training-period CV mean out-of-fold AP by C "
+          f"(sensors kept per fold: {sorted(set(cv['n_sensors']))})")
     print(cv.groupby("C")["average_precision"].mean().round(4).to_string())
-    print(f"selected C = {reference_c}\n")
+    print(f"selected C = {reference_c}; sensors kept on the full training period: "
+          f"{len(python_ids)} (same set as SQL)\n")
     print(metrics.round(4).to_string(index=False))
     print(f"\nAP differences on test ({N_BOOTSTRAP} paired bootstrap resamples):")
     print(diffs.round(4).to_string(index=False))

@@ -30,7 +30,7 @@ def synthetic():
 
 def test_higher_score_means_more_anomalous_and_fail_is_positive():
     runs, X = synthetic()
-    metrics = evaluate(score_runs(runs, X)).set_index(["method", "split"])
+    metrics = evaluate(score_runs(runs, X, X)).set_index(["method", "split"])
     # Obvious outliers labelled fail must rank at the top; a flipped score or
     # flipped label would push average precision towards or below prevalence
     for method in ("isolation_forest", "logistic_regression"):
@@ -40,10 +40,10 @@ def test_higher_score_means_more_anomalous_and_fail_is_positive():
 
 def test_test_period_values_do_not_affect_training_fit():
     runs, X = synthetic()
-    before = score_runs(runs, X)
+    before = score_runs(runs, X, X)
     X_changed = X.copy()
     X_changed[N_TRAIN:] = X_changed[N_TRAIN:] * 50 + 100
-    after = score_runs(runs, X_changed)
+    after = score_runs(runs, X_changed, X_changed)
     # Imputer, scaler, forest and logistic regression are fitted on train rows
     # only, so train scores are identical
     for method in ("isolation_forest", "logistic_regression"):

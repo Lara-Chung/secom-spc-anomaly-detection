@@ -11,6 +11,7 @@ Docker Compose and Python read identical values.
 
 import os
 
+import pandas as pd
 import psycopg
 from dotenv import dotenv_values
 from psycopg.conninfo import make_conninfo
@@ -43,3 +44,9 @@ def connection_string(dotenv_file=DOTENV_FILE) -> str:
 
 def connect(**kwargs) -> psycopg.Connection:
     return psycopg.connect(connection_string(), **kwargs)
+
+
+def fetch(conn, query: str, params=None) -> pd.DataFrame:
+    """Run a query (optionally with bound parameters) and return a DataFrame."""
+    cur = conn.execute(query, params)
+    return pd.DataFrame(cur.fetchall(), columns=[c.name for c in cur.description])
