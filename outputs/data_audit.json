@@ -1,0 +1,32 @@
+{
+  "source_url": "https://archive.ics.uci.edu/static/public/179/secom.zip",
+  "archive_sha256": "eea568baf3c2229096d7d294cf0b096b5502bd96d92c0b80a65b84714059be8e",
+  "n_runs": 1567,
+  "n_sensors": 590,
+  "label_values": {
+    "-1": 1463,
+    "1": 104
+  },
+  "label_mapping": {
+    "-1": "pass",
+    "1": "fail"
+  },
+  "n_fail": 104,
+  "fail_prevalence": 0.06636885768985322,
+  "missing_cells": 41951,
+  "missing_cell_rate": 0.04537548808583821,
+  "runs_with_any_missing": 1567,
+  "sensors_with_any_missing": 538,
+  "sensors_missing_rate_gt_50pct": 28,
+  "sensors_all_missing": 0,
+  "sensors_constant_full_data": 116,
+  "ts_min": "2008-07-19 11:55:00",
+  "ts_max": "2008-10-17 06:07:00",
+  "ts_unparsed": 0,
+  "ts_sorted_in_file_order": true,
+  "ts_out_of_order_rows": 0,
+  "ts_duplicate_rows": 65,
+  "ts_distinct_values": 1534,
+  "duplicate_feature_rows": 0,
+  "n_days_with_runs": 86
+}
