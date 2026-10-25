@@ -1,0 +1,4 @@
+comparison,ap_difference,ci_low,ci_high
+isolation_forest - spc_frozen,-0.0085,-0.0481,0.0151
+isolation_forest - spc_rolling,-0.0398,-0.1183,-0.004
+spc_frozen - spc_rolling,-0.0313,-0.1038,0.0104
