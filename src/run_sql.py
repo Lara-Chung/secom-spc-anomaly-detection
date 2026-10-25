@@ -1,8 +1,7 @@
-"""Create the analysis views (sql/00-05) and export their results to outputs/sql/.
+"""Create the analysis views (every sql/0*.sql file) and export results to outputs/sql/.
 
 Usage: uv run python src/run_sql.py
-Each sql/0*.sql file creates one view; the files run in name order because
-later views build on earlier ones.
+The files run in name order because later views build on earlier ones.
 """
 
 import csv
@@ -18,6 +17,8 @@ EXPORTS = {
     "sensor_quality": "SELECT * FROM sensor_quality ORDER BY sensor_id",
     "fail_trends_daily": "SELECT * FROM fail_trends_daily ORDER BY day",
     "spc_run_scores": "SELECT * FROM spc_run_scores ORDER BY ts, run_id",
+    "period_shift": "SELECT * FROM period_shift ORDER BY sensor_id",
+    "period_shift_summary": "SELECT * FROM period_shift_summary",
 }
 
 
