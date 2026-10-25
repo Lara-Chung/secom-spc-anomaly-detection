@@ -13,6 +13,7 @@ import pandas as pd
 import psycopg
 
 from db import connect, fetch
+from evidence import REASONS, SCORE_COLUMN, check_consistent, summarise, threshold_from_metrics
 from secom_data import OUTPUT_DIR, REPO_ROOT
 
 SQL_DIR = REPO_ROOT / "sql" / "investigation"
@@ -21,8 +22,6 @@ EVIDENCE_SQL = {
     "spc_frozen": SQL_DIR / "run_sensor_evidence_frozen.sql",
     "spc_rolling": SQL_DIR / "run_sensor_evidence_rolling.sql",
 }
-SCORE_COLUMN = {"spc_frozen": "frozen_n_alerts", "spc_rolling": "rolling_n_alerts"}
-REASONS = ("missing_value", "insufficient_history", "flat_window")
 
 
 class InvestigationError(Exception):
@@ -34,11 +33,10 @@ def run_threshold(method: str) -> float:
     path = OUTPUT_DIR / "metrics.csv"
     if not path.exists():
         raise InvestigationError(f"{path} not found; run `uv run python src/train_evaluate.py` first")
-    metrics = pd.read_csv(path)
-    row = metrics[(metrics["method"] == method) & (metrics["split"] == "train")]
-    if row.empty:
-        raise InvestigationError(f"{path} has no training row for {method}; rerun `uv run python src/train_evaluate.py`")
-    return float(row["threshold"].iloc[0])
+    try:
+        return threshold_from_metrics(pd.read_csv(path), method)
+    except LookupError as exc:
+        raise InvestigationError(f"{path}: {exc}; rerun `uv run python src/train_evaluate.py`") from exc
 
 
 def check_method(method: str) -> None:
@@ -76,25 +74,6 @@ def sensor_evidence(conn, run_id: int, method: str) -> pd.DataFrame:
     numeric = ["value", "baseline_mean", "baseline_std", "lower_limit", "upper_limit", "z_score", "abs_z_score"]
     evidence[numeric] = evidence[numeric].astype(float)
     return evidence
-
-
-def summarise(evidence: pd.DataFrame) -> dict:
-    """Counts with explicit denominators: scope >= observed >= assessable >= alerted."""
-    reasons = evidence["unassessable_reason"].value_counts()
-    return {
-        "sensor_scope_count": len(evidence),
-        "n_observed": int(evidence["value"].notna().sum()),
-        "n_assessable": int(evidence["is_assessable"].sum()),
-        "n_alerted": int(evidence["is_sensor_alert"].fillna(False).sum()),
-        **{f"n_{reason}": int(reasons.get(reason, 0)) for reason in REASONS},
-    }
-
-
-def check_consistent(header: dict, summary: dict) -> None:
-    """The sensor-level alerts must add up to the run-level score from the view."""
-    if summary["n_alerted"] != header["score"]:
-        raise RuntimeError(f"run {header['run_id']}: sensor alerts ({summary['n_alerted']}) disagree "
-                           f"with the run score ({header['score']})")
 
 
 def main(argv=None) -> int:

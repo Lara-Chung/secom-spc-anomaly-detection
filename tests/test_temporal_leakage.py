@@ -64,7 +64,14 @@ def refresh(conn):
 
 
 def limits(conn):
-    return conn.execute("SELECT sensor_id, mean_train, std_train FROM frozen_limits ORDER BY sensor_id").fetchall()
+    rows = conn.execute("SELECT sensor_id, mean_train, std_train FROM frozen_limits ORDER BY sensor_id").fetchall()
+    return [r[0] for r in rows], np.array([r[1:] for r in rows], dtype=float)
+
+
+def assert_same_limits(before, after):
+    """Same sensors, and mean/std equal up to the re-aggregation order of a REFRESH."""
+    assert before[0] == after[0]
+    assert np.allclose(before[1], after[1], rtol=1e-12, atol=0)
 
 
 def rolling(conn):
@@ -114,7 +121,7 @@ def test_changing_future_values_does_not_change_past_results(conn):
     after_rolling = rolling(conn)
     after_scores = run_scores(conn)
     # The limits themselves must not move: alert counts alone could stay equal by chance
-    assert limits(conn) == pytest.approx(before_limits, rel=1e-12)  # a REFRESH may re-aggregate in another order
+    assert_same_limits(before_limits, limits(conn))
 
     assert [r for r in after_rolling if r[0] < N_TRAIN] == [r for r in before_rolling if r[0] < N_TRAIN]
     # Frozen limits come from the training period, so train-period scores are unchanged too
@@ -131,7 +138,7 @@ def test_changing_labels_does_not_change_scores_or_evidence(conn):
     before_limits = limits(conn)
     conn.execute("UPDATE runs SET label = -label")  # every run, so train-derived limits are covered too
     refresh(conn)
-    assert limits(conn) == pytest.approx(before_limits, rel=1e-12)  # a REFRESH may re-aggregate in another order
+    assert_same_limits(before_limits, limits(conn))
     assert rolling(conn) == before_rolling
     assert run_scores(conn) == before_scores
     pd.testing.assert_frame_equal(sensor_evidence(conn, N_TRAIN + 5, "spc_frozen"), before_evidence)

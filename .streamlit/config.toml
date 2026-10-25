@@ -1,0 +1,15 @@
+# Project-level Streamlit settings for the read-only view (app.py).
+[server]
+showEmailPrompt = false   # skip the first-run "enter your email" prompt
+
+[browser]
+gatherUsageStats = false  # do not send usage statistics
+
+[theme]
+# Slate palette: primary colour also drives the chart bars in app.py.
+# Contrast on the white background: primary 7.9:1, text 10.4:1.
+primaryColor = "#3a5278"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f6fa"
+textColor = "#334155"
+font = "sans serif"

@@ -11,6 +11,8 @@ dependencies = [
     "psycopg[binary]",
     "matplotlib",
     "python-dotenv>=1.2.4",
+    "streamlit>=1.66.1",
+    "altair>=6.3.0",
 ]
 
 [dependency-groups]

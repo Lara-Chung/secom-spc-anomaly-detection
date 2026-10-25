@@ -12,7 +12,8 @@ from importlib.metadata import version
 import pandas as pd
 
 from db import connect, fetch
-from investigate_run import EVIDENCE_SQL, SQL_DIR, check_consistent, run_header, run_threshold, sensor_evidence, summarise
+from evidence import check_consistent, summarise
+from investigate_run import EVIDENCE_SQL, SQL_DIR, run_header, run_threshold, sensor_evidence
 from secom_data import OUTPUT_DIR, REPO_ROOT
 
 INVESTIGATION_DIR = OUTPUT_DIR / "investigation"
@@ -178,18 +179,21 @@ def main() -> None:
         workload = alert_workload(conn, thresholds)
         totals = check_against_metrics(workload)
         cases = select_cases(conn, thresholds[CASE_METHOD])
-        headers, summaries, evidence = {}, {}, {}
-        for case in cases:
-            if case["run_id"] is None:
-                continue
-            rid = case["run_id"]
-            headers[rid] = run_header(conn, rid, CASE_METHOD)
-            evidence[rid] = sensor_evidence(conn, rid, CASE_METHOD)
-            summaries[rid] = summarise(evidence[rid])
-            check_consistent(headers[rid], summaries[rid])
+        # Evidence for every case under both rules (the read-only app can show either),
+        # each checked against the run score; the document uses the CASE_METHOD entries
+        headers, summaries, evidence, frames = {}, {}, {}, []
         selected = [c for c in cases if c["run_id"] is not None]
-        if selected:
-            all_evidence = pd.concat(evidence[c["run_id"]].assign(case_group=c["group"]) for c in selected)
+        for c in selected:
+            rid = c["run_id"]
+            for m in EVIDENCE_SQL:
+                header, ev = run_header(conn, rid, m), sensor_evidence(conn, rid, m)
+                summary = summarise(ev)
+                check_consistent(header, summary)
+                frames.append(ev.assign(case_group=c["group"]))
+                if m == CASE_METHOD:
+                    headers[rid], summaries[rid], evidence[rid] = header, summary, ev
+        if frames:
+            all_evidence = pd.concat(frames)
         else:  # an empty result still carries the query's columns, so the export stays in step
             all_evidence = sensor_evidence(conn, -1, CASE_METHOD).assign(case_group=pd.Series(dtype=str))
 

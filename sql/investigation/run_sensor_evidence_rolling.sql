@@ -30,6 +30,8 @@ band AS (
         max(h.ts) FILTER (WHERE m.value IS NOT NULL)  AS last_observed_ts
     FROM history h
     JOIN measurements m USING (run_id)
+    JOIN sensor_quality q USING (sensor_id)
+    WHERE q.is_eligible
     GROUP BY m.sensor_id
 ),
 readings AS (

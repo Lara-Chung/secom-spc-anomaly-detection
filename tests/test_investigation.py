@@ -7,7 +7,8 @@ import pytest
 
 from conftest import skip_or_fail
 from db import connect, fetch
-from investigate_run import EVIDENCE_SQL, SCORE_COLUMN, InvestigationError, run_header, sensor_evidence, summarise
+from evidence import SCORE_COLUMN, summarise
+from investigate_run import EVIDENCE_SQL, InvestigationError, run_header, sensor_evidence
 from secom_data import OUTPUT_DIR
 from train_evaluate import EligibleSensors
 
