@@ -35,6 +35,7 @@ flowchart LR
     C -->|run_sql.py: sql/00-06| D[Views: quality, trends, rolling SPC, run scores, features]
     D -->|train_evaluate.py| E[Isolation Forest + logistic-regression reference: metrics.csv, reference_cv.csv]
     E -->|make_plots.py| F[outputs/figures]
+    E -->|build_investigation_report.py, investigate_run.py| G[sql/investigation: sensor evidence, alert workload, docs/investigation_examples.md]
 ```
 
 ## 3. Database schema
@@ -69,7 +70,7 @@ docker compose exec db psql -U secom -d secom -c "SELECT * FROM period_shift_sum
 
 ## 5. SQL queries
 
-Each `sql/0*.sql` file creates one view (two for `06`). Later views build on earlier ones. `src/run_sql.py` runs them in order and exports the small results to `outputs/sql/`.
+Each `sql/0*.sql` file creates one view; `04`, `05` and `06` create a second one (`frozen_limits`, `feature_export_all`, `period_shift_summary`). Later views build on earlier ones. `sensor_quality`, `frozen_limits` and `spc_run_scores` are materialized views: the first two are fixed once the training period is loaded, and the third would otherwise recompute the rolling window for every reading on every query. `src/run_sql.py` runs the files in order, which rebuilds them, and exports the small results to `outputs/sql/`.
 
 | File | Question it answers | SQL used |
 |---|---|---|
@@ -77,9 +78,17 @@ Each `sql/0*.sql` file creates one view (two for `06`). Later views build on ear
 | `01_sensor_quality.sql` | How complete and how variable is each sensor? Which sensors are excluded? | CTE, JOIN, aggregate `FILTER`, `count(DISTINCT)` |
 | `02_fail_trends.sql` | How many runs per day, and how does the fail rate move? | CTE, `GROUP BY`, named `WINDOW` with `RANGE BETWEEN INTERVAL '6 days' PRECEDING` |
 | `03_spc_rolling.sql` | Which readings fall outside a 3σ band built from that sensor's previous 50 runs? | CTE, three-table JOIN, `PARTITION BY ... ROWS BETWEEN 50 PRECEDING AND 1 PRECEDING` |
-| `04_spc_run_scores.sql` | How many sensors are out of control in each run (frozen and rolling limits)? | Three CTEs, JOIN, aggregate `FILTER` |
-| `05_feature_export.sql` | What is the model input? One row per run with the eligible sensors as an array | JOIN, `array_agg(... ORDER BY ...)` |
-| `06_period_shift.sql` | Did sensor levels move between the training and test periods? | CTE, self-join on the same CTE, `percentile_cont` for medians |
+| `04_spc_run_scores.sql` | What are the frozen control limits, and how many sensors are out of control in each run (frozen and rolling)? | `frozen_limits` view, two CTEs, JOIN, aggregate `FILTER` |
+| `05_feature_export.sql` | What is the model input? One row per run with sensor readings as an array (eligible sensors; all 590 for the supervised reference) | JOIN, `array_agg(... ORDER BY ...)` |
+| `06_period_shift.sql` | Did sensor levels move between the training and test periods? | CTE on `frozen_limits`, self-join, `percentile_cont` for medians |
+
+Three parameterised queries in `sql/investigation/` are run with bound parameters by `src/investigate_run.py` and `src/build_investigation_report.py` (section 8):
+
+| File | Question it answers | SQL used |
+|---|---|---|
+| `run_sensor_evidence_frozen.sql` | For one run, which sensors are outside the frozen limits, by how much, and which could not be assessed? | JOIN on `frozen_limits`, `%(run_id)s` bind parameter, `ORDER BY ... NULLS LAST` |
+| `run_sensor_evidence_rolling.sql` | The same question under the past-only rolling band, with the history behind each band | CTE that takes the 50 preceding runs, aggregates with `ORDER BY` inside `avg()` and `stddev_samp()`, `LEFT JOIN`, `CASE` for the unassessable reason |
+| `alert_workload.sql` | How many runs per day does each rule send to an engineer, and how many of them failed? | `CROSS JOIN LATERAL (VALUES ...)` to unpivot the two rules, aggregate `FILTER`, `nullif` |
 
 **Sensor exclusion** (`01`, decided on the training period only): 122 sensors are constant in the training period and 24 have more than 50% missing readings there. The remaining 444 sensors are used by SPC and the model. Sensors that are constant most of the time but not always are kept, because a rare deviation is what SPC is meant to catch.
 
@@ -96,7 +105,9 @@ Each `sql/0*.sql` file creates one view (two for `06`). Later views build on ear
 
 No two runs at the boundary share a time stamp.
 
-**What is fitted on the training period only:** the sensor exclusion list, the median imputer, the scaler, the Isolation Forest, the logistic regression, the frozen 3σ limits, and every alert threshold. The unsupervised scores and the SPC limits use no labels. The supervised reference uses training-period labels, and the alert thresholds use one number from them, the training fail rate (see the threshold rule below). Test labels are used only to evaluate.
+**Time semantics.** The time stamp is the test point of each run (UCI). SECOM does not say when each sensor reading became available, so this is a retrospective evaluation in test-point order, not a demonstration of early warning. Runs that share a time stamp are ordered by `run_id` (file order), and the rolling band of such a run may include the other runs at the same time stamp. Both are offline replay assumptions; they are stated here because they cannot be tested.
+
+**What is fitted on the training period only:** the sensor exclusion list, the median imputer, the scaler, the Isolation Forest, the logistic regression, the frozen 3σ limits, and every alert threshold. The unsupervised scores and the SPC limits use no labels. The supervised reference uses training-period labels, and the alert thresholds use one number from them, the training fail rate (see the threshold rule below). Test labels are used only to evaluate. Inside the reference's cross-validation, sensor eligibility, imputation and scaling are refitted on each fold's fit rows (`EligibleSensors` in `src/train_evaluate.py`, the same rule as `01_sensor_quality.sql`). Fitted on the whole training period, the Python rule keeps the same 444 sensors as the SQL view; a test checks this.
 
 **Four scores per run**, all oriented so that higher means more anomalous:
 
@@ -147,30 +158,53 @@ All numbers below are from `outputs/metrics.csv` and `outputs/ap_differences.csv
 - A direct way to read the operating points: lift = recall ÷ alert rate, which is 1 for random alerts. The Isolation Forest alerts on 12.1% of test runs and catches 11.5% of fails (lift 0.95). Frozen SPC alerts on 10.2% and catches 15.4% (lift 1.51). These lifts rest on 3 and 4 true positives, so one run more or less changes them a lot.
 - The rolling SPC score has the highest AP (0.102) and its difference from the Isolation Forest excludes zero by a small margin. It also follows a different protocol (its baseline moves with the test period), so this is not evidence that SPC beats the model under equal information.
 - The Isolation Forest AP drops from 0.129 on the training period (in-sample) to 0.062 on the test period. Both frozen methods alert on more test runs than their training rate (12.1% and 10.2% against about 7%). `06_period_shift.sql` describes what moved. Of the 444 eligible sensors, 56 have a test-period median more than 0.5 training standard deviations away from their training median (7 sensors more than 1). The mean per-sensor alert rate under frozen limits rises from 0.98% to 1.21%; it rises on 179 sensors and falls on 236. These figures show that some sensors shifted. They do not show that the shift causes the extra alerts.
-- The supervised reference does no better. With C = 0.01, chosen by the training-period cross-validation, logistic regression reaches AP 0.661 in-sample and 0.070 on the test period. At its training-derived threshold it alerts on 0.8% of test runs and catches none of the 26 fails. In the cross-validation itself (`outputs/reference_cv.csv`), mean out-of-fold AP ranges from 0.087 (C = 1) to 0.119 (C = 0.01), against fold fail rates of 0.119, 0.046, 0.027 and 0.027; the best single fold reaches 0.204 with 6 fails. A label-aware model therefore also ranks later fails close to random on this data, both inside the training period and on the holdout. This is consistent with the reading that the sensors record little of what makes a product fail, but 26 positives do not settle it.
+- The supervised reference does no better. With C = 0.01, chosen by the training-period cross-validation, logistic regression reaches AP 0.661 in-sample and 0.070 on the test period. At its training-derived threshold it alerts on 0.8% of test runs and catches none of the 26 fails. In the cross-validation itself (`outputs/reference_cv.csv`), mean out-of-fold AP ranges from 0.086 (C = 1) to 0.118 (C = 0.01), against fold fail rates of 0.119, 0.046, 0.027 and 0.027; the best single fold reaches 0.204 with 6 fails. Fitting eligibility once on the whole training period instead of per fold (the approach in commit `35c4652`) changes each of these means by less than 0.001 and does not change the selected C or the test-period result. A label-aware model therefore also ranks later fails close to random on this data, both inside the training period and on the holdout. This is consistent with the reading that the sensors record little of what makes a product fail, but 26 positives do not settle it.
 
-## 8. Limitations
+## 8. Alert investigation
+
+An engineer who sees a run alert needs to know which sensors crossed their limits, by how much, what the limits were built from, and which sensors could not be assessed. The investigation queries answer that from the database; Python only binds parameters, checks consistency and formats the output.
+
+```bash
+uv run python src/investigate_run.py --run-id 1458 --method spc_frozen --top 10
+uv run python src/investigate_run.py --run-id 1458 --method spc_rolling --csv run_1458_rolling.csv
+```
+
+The output starts with the run-level score, the training-derived threshold and the alert decision. Then come four nested counts: sensors in scope (444 eligible), observed (reading present), assessable (a band exists and the reading is present) and alerting. Sensors that are not assessable carry a reason: `missing_value`, `insufficient_history` (fewer than 20 of the previous 50 readings) or `flat_window`. A run with nothing assessable is reported as such, not as normal. The sum of sensor alerts must equal the run score in `spc_run_scores`; the CLI and the report builder raise if it does not. The pass/fail label is shown only with `--outcome`. Under the rolling rule the first 20 training runs have no assessable sensor, because no sensor has the 20 previous readings the band requires; under the frozen rule every run is assessable.
+
+`src/build_investigation_report.py` writes `outputs/investigation/`. `alert_workload.csv` has one row per day, rule and period: runs, assessable runs, alerts, alerts per 100 assessable runs, and the retrospective TP/FP/FN/TN. Unassessable runs are listed separately, not counted as true negatives. `sensor_evidence.csv` holds the evidence for three example runs, and `manifest.json` records the data hash, package versions and thresholds. The totals are checked against `outputs/metrics.csv`. Test-period totals:
+
+| Rule | Runs | Alerts | Alerts per 100 runs | TP | FP | FN | TN |
+|---|---|---|---|---|---|---|---|
+| SPC 3σ, frozen | 471 | 48 | 10.2 | 4 | 44 | 22 | 401 |
+| SPC 3σ, rolling | 471 | 29 | 6.2 | 5 | 24 | 21 | 421 |
+
+[`docs/investigation_examples.md`](docs/investigation_examples.md) walks through three test-period runs chosen by a fixed rule: the highest frozen score among alerted-and-failed, alerted-and-passed, and not-alerted-and-failed runs (runs 1151, 1458 and 1227). SECOM does not name its sensors, so the examples stop at which sensors deviated and by how much. They do not claim a root cause, and an alert on a passing run is not necessarily a false alarm about the process.
+
+## 9. Limitations
 
 - **Few positives.** The test period has 26 fails. Each true positive moves recall by 3.8 percentage points, and the AP intervals above are wide for that reason. No claim of "method A beats method B" is supported by this data.
 - **Sensor anomalies and product failures do not align well here.** Both unsupervised scores rank runs by how unusual their readings are, and on this holdout that ranking had limited relation to the yield label. Three factors could explain this, and the present analysis cannot separate them: the small number of positives, the distribution shift over time, and a real gap between what the sensors record and what makes a product fail. The supervised reference (AP 0.070 on the same holdout) points to the third factor but does not settle it. The dataset's own documentation reports balanced error rates of 33.5% to 40.1% for supervised feature-selection baselines under 10-fold cross-validation (`secom.names`), so even label-aware methods find the problem hard.
 - **Non-stationary data.** The monthly fail rate moves from 22.2% in July to 2.9% in September, and 56 of 444 sensors shift level between the periods. Statistics fitted on the first 70% do not describe the last 30%. A single chronological split cannot say how much of the drop in AP is drift and how much is sampling noise.
 - **Threshold rule.** Equalising the training alert rate with the training fail rate is one of three defensible choices. Fixing an acceptable false-alarm rate on passing runs, or choosing a threshold on a validation period, would give different operating points; none was evaluated.
 - **Undocumented extreme values.** Ten readings lie between 9,990 and 10,000 (sensor 204: 5, sensor 140: 4, sensor 90: 1), far from each sensor's typical range (sensor 140's median is 0.24). They look like placeholder codes, but `secom.names` does not say so, and they are treated as ordinary readings.
+- **View recomputation.** `spc_rolling` is a plain view, so a query on it recomputes the window statistics for all 695,748 eligible readings (about 5 seconds on the development machine). `spc_run_scores` is materialized so that this happens once per `run_sql.py` run. The rolling evidence query does not read the view: it rebuilds the band for one run from its 50 preceding runs in about 10 ms. `tests/test_investigation.py` checks that its baseline, standard deviation, z-score, history count and alert flag equal the view's, value for value, on 8 runs chosen around the window boundaries. An interactive interface should read the materialized views and exported artifacts rather than `spc_rolling`.
+- **Inspected holdout.** The test period was examined while the investigation tools and the supervised reference were built. Any method added later and reported on it is a retrospective extension, not a result on untouched data.
 - **Scope.** Offline analysis of one historical dataset. Nothing here was validated on a production line, and alert counts are not calibrated failure probabilities.
 
-## 9. Implemented and future work
+## 10. Implemented and future work
 
-Implemented: data audit, PostgreSQL schema and loader, seven SQL query files (eight views), past-only rolling SPC with leakage tests, Isolation Forest with train-only preprocessing, a supervised logistic-regression reference with a training-period cross-validation check, chronological holdout with AP, precision, recall, confusion matrices and bootstrap intervals, two figures, 13 tests (`uv run pytest`).
+Implemented: data audit, PostgreSQL schema and loader, seven SQL query files (ten views) plus three parameterised investigation queries, past-only rolling SPC with leakage tests, Isolation Forest with train-only preprocessing, a supervised logistic-regression reference with fold-local preprocessing and a training-period cross-validation over C, chronological holdout with AP, precision, recall, confusion matrices and bootstrap intervals, a sensor-evidence CLI, an alert-workload report, three documented cases, two figures, 24 tests (`uv run pytest`).
 
-Not implemented: random stratified splits with multiple seeds, expanding-window validation, PCA Hotelling T² / SPE, per-run investigation of which sensors triggered an alert, and any dashboard.
+Not implemented: random stratified splits, expanding-window validation, PCA Hotelling T² / SPE, and any dashboard or interactive interface.
 
 ## Tests
 
 - `tests/test_data_contract.py`: the loaded tables match the raw files, and the PK, FK and CHECK constraints reject bad rows.
-- `tests/test_temporal_leakage.py`: on synthetic data run through the real `sql/` files, the rolling baseline uses previous rows only, and changing test-period values leaves training-period scores unchanged.
+- `tests/test_temporal_leakage.py`: on synthetic data run through the real `sql/` files, the rolling baseline uses previous rows only, runs with equal time stamps are ordered by `run_id`, changing test-period values leaves training-period scores and the frozen limits unchanged, flipping labels changes no score, limit or sensor evidence, and the evidence for one run keeps the full history and the same limits as the SPC views.
 - `tests/test_evaluation.py`: score direction and label mapping, and training scores and thresholds do not depend on test-period features.
+- `tests/test_investigation.py`: sensor alerts sum to the run score, the nested counts and unassessable reasons add up, unknown runs and methods are rejected, the Python eligibility rule matches the SQL view, and the workload totals agree with `metrics.csv`.
 
-`test_data_contract.py` needs the database running and loaded, `test_temporal_leakage.py` needs it running, and `test_evaluation.py` needs no database. Tests that cannot reach what they need skip with a message, except under `SECOM_TESTS_REQUIRE_DB=1` (set by `run_all.sh`), where they fail instead.
+`test_data_contract.py` and `test_investigation.py` need the database running and loaded (the latter also needs `outputs/metrics.csv`), `test_temporal_leakage.py` needs it running, and `test_evaluation.py` needs no database. Tests that cannot reach what they need skip with a message, except under `SECOM_TESTS_REQUIRE_DB=1` (set by `run_all.sh`), where they fail instead.
 
 ## License
 

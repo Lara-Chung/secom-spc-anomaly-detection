@@ -12,15 +12,7 @@ DROP VIEW IF EXISTS period_shift_summary CASCADE;
 
 CREATE VIEW period_shift AS
 WITH limits AS (
-    SELECT
-        m.sensor_id,
-        avg(m.value)          AS mean_train,
-        stddev_samp(m.value)  AS std_train
-    FROM measurements m
-    JOIN run_split s USING (run_id)
-    JOIN sensor_quality q USING (sensor_id)
-    WHERE s.split = 'train' AND q.is_eligible
-    GROUP BY m.sensor_id
+    SELECT sensor_id, mean_train, std_train FROM frozen_limits
 ),
 per_period AS (
     SELECT

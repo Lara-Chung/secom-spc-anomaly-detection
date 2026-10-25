@@ -11,4 +11,5 @@ uv run python src/load_database.py
 uv run python src/run_sql.py
 uv run python src/train_evaluate.py
 uv run python src/make_plots.py
+uv run python src/build_investigation_report.py
 SECOM_TESTS_REQUIRE_DB=1 uv run pytest -q
