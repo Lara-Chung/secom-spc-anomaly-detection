@@ -13,20 +13,26 @@ import pandas as pd
 from sklearn.metrics import precision_recall_curve
 
 from secom_data import OUTPUT_DIR
+from train_evaluate import METHODS
 
 FIG_DIR = OUTPUT_DIR / "figures"
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 GRID = "#e4e3df"
-# Fixed categorical order. Checked with an OKLab colour-vision simulation:
-# the closest adjacent pair (aqua vs orange) keeps a Delta E of 9.2 under deutan
-# simulation and 32.7 under tritan, and no pair falls below the 8.0 target.
+# (colour, linestyle, label). The three unsupervised series use a fixed
+# categorical palette checked over every colour pair with an OKLab colour-vision
+# simulation (dataviz validate_palette.js, --pairs all): worst pair aqua vs
+# orange, Delta E 9.2 under deutan, above the 8.0 target. No fourth hue passed
+# the same check, so the supervised reference uses neutral ink and a dash-dot
+# line instead of a colour of its own.
 SERIES = {
-    "isolation_forest": ("#2a78d6", "Isolation Forest"),
-    "spc_frozen": ("#eb6834", "SPC 3σ, frozen train limits"),
-    "spc_rolling": ("#1baf7a", "SPC 3σ, rolling past-only (supplementary)"),
+    "isolation_forest": ("#2a78d6", "-", "Isolation Forest"),
+    "spc_frozen": ("#eb6834", "-", "SPC 3σ, frozen train limits"),
+    "spc_rolling": ("#1baf7a", "-", "SPC 3σ, rolling past-only (supplementary)"),
+    "logistic_regression": (INK, "-.", "Logistic regression (supervised reference)"),
 }
+assert set(SERIES) == set(METHODS), "every scored method needs a plot style"
 
 plt.rcParams.update({
     "figure.facecolor": SURFACE,
@@ -53,7 +59,7 @@ def plot_pr_curves() -> None:
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     y_max = 0.0
-    for method, (color, name) in SERIES.items():
+    for method, (color, linestyle, name) in SERIES.items():
         precision, recall, _ = precision_recall_curve(test["is_fail"], test[method])
         # Drop the (recall 0, precision 1) end point sklearn appends; it is not an observed threshold
         precision, recall = precision[:-1], recall[:-1]
@@ -62,11 +68,12 @@ def plot_pr_curves() -> None:
         # steps-post on sklearn's decreasing-recall arrays holds precision[i] over
         # (recall[i+1], recall[i]], the same convention as average_precision_score
         # and sklearn's PrecisionRecallDisplay
-        ax.step(recall, precision, where="post", color=color, linewidth=2,
+        ax.step(recall, precision, where="post", color=color, linestyle=linestyle, linewidth=2,
                 label=f"{name}  (AP {m['average_precision']:.3f})")
-        # Operating point at the train-derived threshold
+        # Operating point at the train-derived threshold; clip_on=False keeps a
+        # point on the axis boundary (e.g. recall 0) fully visible
         ax.plot(m["recall"], m["precision"], "o", markersize=8, color=color,
-                markeredgecolor=SURFACE, markeredgewidth=2)
+                markeredgecolor=SURFACE, markeredgewidth=2, clip_on=False, zorder=5)
     ax.axhline(prevalence, color=INK_SECONDARY, linewidth=1.2, linestyle="--",
                label=f"Random ranking (test fail rate {prevalence:.3f})")
     ax.set_xlim(0, 1)

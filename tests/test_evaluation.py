@@ -33,8 +33,9 @@ def test_higher_score_means_more_anomalous_and_fail_is_positive():
     metrics = evaluate(score_runs(runs, X)).set_index(["method", "split"])
     # Obvious outliers labelled fail must rank at the top; a flipped score or
     # flipped label would push average precision towards or below prevalence
-    assert metrics.loc[("isolation_forest", "test"), "average_precision"] > 0.9
-    assert metrics.loc[("isolation_forest", "test"), "recall"] > 0.9
+    for method in ("isolation_forest", "logistic_regression"):
+        assert metrics.loc[(method, "test"), "average_precision"] > 0.9
+        assert metrics.loc[(method, "test"), "recall"] > 0.9
 
 
 def test_test_period_values_do_not_affect_training_fit():
@@ -43,9 +44,9 @@ def test_test_period_values_do_not_affect_training_fit():
     X_changed = X.copy()
     X_changed[N_TRAIN:] = X_changed[N_TRAIN:] * 50 + 100
     after = score_runs(runs, X_changed)
-    # Imputer and forest are fitted on train rows only, so train scores are identical
-    pd.testing.assert_series_equal(
-        before["isolation_forest"][:N_TRAIN], after["isolation_forest"][:N_TRAIN]
-    )
+    # Imputer, scaler, forest and logistic regression are fitted on train rows
+    # only, so train scores are identical
+    for method in ("isolation_forest", "logistic_regression"):
+        pd.testing.assert_series_equal(before[method][:N_TRAIN], after[method][:N_TRAIN])
     # Thresholds also come from train only
     pd.testing.assert_series_equal(evaluate(before)["threshold"], evaluate(after)["threshold"])

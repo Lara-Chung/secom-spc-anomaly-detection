@@ -2,7 +2,8 @@
 
 Usage: uv run python src/train_evaluate.py   (after src/run_sql.py)
 Reads the feature_export and spc_run_scores views.
-Writes outputs/metrics.csv, outputs/ap_differences.csv and outputs/run_scores.csv.
+Writes outputs/metrics.csv, outputs/ap_differences.csv, outputs/run_scores.csv
+and outputs/reference_cv.csv.
 
 All scores are oriented so that higher = more anomalous. Fail (is_fail) is the
 positive class. Every threshold is derived from training-period scores only.
@@ -12,8 +13,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, confusion_matrix
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from db import connect
 from secom_data import OUTPUT_DIR
@@ -21,12 +25,15 @@ from secom_data import OUTPUT_DIR
 SEED = 0
 N_ESTIMATORS = 300
 N_BOOTSTRAP = 2000
+REFERENCE_C_GRID = (1.0, 0.1, 0.01, 0.001)  # inverse L2 strength, searched on train only
+REFERENCE_CV_SPLITS = 4
 
 # method -> role in the comparison
 METHODS = {
-    "isolation_forest": "primary",   # fitted on train, frozen
-    "spc_frozen": "primary",         # 3-sigma limits from train, frozen
-    "spc_rolling": "supplementary",  # past-only rolling baseline (online monitoring)
+    "isolation_forest": "primary",        # fitted on train, frozen
+    "spc_frozen": "primary",              # 3-sigma limits from train, frozen
+    "spc_rolling": "supplementary",       # past-only rolling baseline (online monitoring)
+    "logistic_regression": "reference",   # supervised: uses training labels, upper reference
 }
 
 
@@ -45,7 +52,16 @@ def load() -> tuple[pd.DataFrame, np.ndarray]:
     return runs, X
 
 
-def score_runs(runs: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
+def reference_pipeline(C: float):
+    """Supervised reference: median imputation, standardisation, L2 logistic regression."""
+    return make_pipeline(
+        SimpleImputer(strategy="median"),
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", C=C, max_iter=1000),
+    )
+
+
+def score_runs(runs: pd.DataFrame, X: np.ndarray, reference_c: float = 1.0) -> pd.DataFrame:
     train = (runs["split"] == "train").to_numpy()
     # No scaling: Isolation Forest picks split values between each feature's
     # min and max, so per-feature scale does not change the result
@@ -58,6 +74,12 @@ def score_runs(runs: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
     scores["isolation_forest"] = -model.score_samples(X)  # negate: higher = more anomalous
     scores["spc_frozen"] = runs["frozen_n_alerts"]
     scores["spc_rolling"] = runs["rolling_n_alerts"]
+
+    # Supervised reference: the only method that sees training labels. C comes
+    # from select_reference_c (training-period CV); nothing else is searched
+    reference = reference_pipeline(reference_c)
+    reference.fit(X[train], runs.loc[train, "is_fail"].astype(int))
+    scores["logistic_regression"] = reference.predict_proba(X)[:, 1]  # P(fail)
     return scores
 
 
@@ -127,9 +149,43 @@ def bootstrap_ap(scores: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return intervals, pd.DataFrame(diffs)
 
 
+def reference_cv(runs: pd.DataFrame, X: np.ndarray) -> pd.DataFrame:
+    """Out-of-fold AP of the supervised reference for each C in REFERENCE_C_GRID,
+    under a time-series split of the training period only. No test-period data."""
+    train = (runs["split"] == "train").to_numpy()
+    X_train = X[train]
+    y_train = runs.loc[train, "is_fail"].astype(int).to_numpy()
+    rows = []
+    for C in REFERENCE_C_GRID:
+        splits = TimeSeriesSplit(n_splits=REFERENCE_CV_SPLITS).split(X_train)
+        for fold, (fit_idx, val_idx) in enumerate(splits):
+            model = reference_pipeline(C).fit(X_train[fit_idx], y_train[fit_idx])
+            y_val = y_train[val_idx]
+            ap = np.nan  # AP is undefined for a fold without a fail run
+            if y_val.sum() > 0:
+                ap = average_precision_score(y_val, model.predict_proba(X_train[val_idx])[:, 1])
+            rows.append({
+                "C": C,
+                "fold": fold,
+                "n_val": len(val_idx),
+                "n_fail_val": int(y_val.sum()),
+                "prevalence_val": y_val.mean(),
+                "average_precision": ap,
+            })
+    return pd.DataFrame(rows)
+
+
+def select_reference_c(cv: pd.DataFrame) -> float:
+    """C with the highest mean out-of-fold AP; ties go to the first value in the grid."""
+    means = cv.groupby("C")["average_precision"].mean()
+    return float(max(REFERENCE_C_GRID, key=lambda c: means[c]))
+
+
 def main() -> None:
     runs, X = load()
-    scores = score_runs(runs, X)
+    cv = reference_cv(runs, X)
+    reference_c = select_reference_c(cv)
+    scores = score_runs(runs, X, reference_c)
     metrics = evaluate(scores)
     intervals, diffs = bootstrap_ap(scores)
     is_test = metrics["split"] == "test"
@@ -141,7 +197,11 @@ def main() -> None:
     rounded = metrics.round({c: 4 for c in metrics.columns if c != "threshold"})
     rounded.to_csv(OUTPUT_DIR / "metrics.csv", index=False)
     diffs.round(4).to_csv(OUTPUT_DIR / "ap_differences.csv", index=False)
+    cv.round(4).to_csv(OUTPUT_DIR / "reference_cv.csv", index=False)
     print(f"features: {X.shape[1]} sensors, train runs: {(runs['split'] == 'train').sum()}")
+    print("supervised reference: training-period CV mean out-of-fold AP by C")
+    print(cv.groupby("C")["average_precision"].mean().round(4).to_string())
+    print(f"selected C = {reference_c}\n")
     print(metrics.round(4).to_string(index=False))
     print(f"\nAP differences on test ({N_BOOTSTRAP} paired bootstrap resamples):")
     print(diffs.round(4).to_string(index=False))
