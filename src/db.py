@@ -1,7 +1,8 @@
 """Database connection helper; settings match docker-compose.yml and .env.example.
 
-The host is always localhost (the Compose container): the loader drops and
-recreates tables, so it must not follow a DATABASE_URL meant for another project.
+The host is always 127.0.0.1 (the Compose container, which publishes its port on
+that address only): the loader drops and recreates tables, so it must not follow
+a DATABASE_URL meant for another project.
 Precedence for each setting: environment variables, then the repo's .env file,
 then defaults. The .env file is parsed with
 python-dotenv; keep it to plain KEY=VALUE lines, as in .env.example, so that
@@ -32,7 +33,7 @@ def setting(name: str, dotenv: dict) -> str:
 def connection_string(dotenv_file=DOTENV_FILE) -> str:
     dotenv = dotenv_values(dotenv_file) if dotenv_file.exists() else {}
     return make_conninfo(
-        host="localhost",
+        host="127.0.0.1",
         port=setting("POSTGRES_PORT", dotenv),
         user=setting("POSTGRES_USER", dotenv),
         password=setting("POSTGRES_PASSWORD", dotenv),

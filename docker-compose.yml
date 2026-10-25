@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secom}
       POSTGRES_DB: ${POSTGRES_DB:-secom}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"  # local development only
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Mounted read-only so SQL files can be run with psql inside the container
