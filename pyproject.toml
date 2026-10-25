@@ -1,0 +1,21 @@
+[project]
+name = "secom-spc-anomaly-detection"
+version = "0.1.0"
+description = "SQL-based SPC monitoring and anomaly detection on the UCI SECOM semiconductor dataset"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "psycopg[binary]",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.uv]
+package = false

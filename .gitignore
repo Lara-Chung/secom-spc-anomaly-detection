@@ -1,0 +1,17 @@
+# Raw data is downloaded by a script, not committed
+data/raw/
+
+# Private planning notes, never published
+private/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local environment
+.env
+
+# OS
+.DS_Store
