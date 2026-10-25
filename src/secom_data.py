@@ -1,5 +1,6 @@
 """Shared paths and raw-file parsing for the UCI SECOM dataset."""
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,8 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = REPO_ROOT / "data" / "raw"
-OUTPUT_DIR = REPO_ROOT / "outputs"
+# SECOM_OUTPUTS_DIR overrides the artifact directory for every entry point (used by tests)
+OUTPUT_DIR = Path(os.environ.get("SECOM_OUTPUTS_DIR", REPO_ROOT / "outputs"))
 
 FEATURES_FILE = RAW_DIR / "secom.data"
 LABELS_FILE = RAW_DIR / "secom_labels.data"

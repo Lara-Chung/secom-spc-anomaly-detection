@@ -3,9 +3,12 @@
 -- training period only, so the test period cannot influence feature selection.
 -- Excluded: missing rate > 50% in train, or constant in train (<= 1 distinct value).
 -- Mostly-constant sensors are kept: rare deviations are what SPC should catch.
-DROP VIEW IF EXISTS sensor_quality CASCADE;
+-- Materialized: the exclusion list is fixed once the data is loaded, and every
+-- downstream query would otherwise re-aggregate all 924,530 readings to get it.
+-- src/run_sql.py rebuilds it on every run.
+DROP MATERIALIZED VIEW IF EXISTS sensor_quality CASCADE;
 
-CREATE VIEW sensor_quality AS
+CREATE MATERIALIZED VIEW sensor_quality AS
 WITH stats AS (
     SELECT
         m.sensor_id,

@@ -38,7 +38,9 @@ def main() -> None:
             with out.open("w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([c.name for c in cur.description])
-                writer.writerows(cur)
+                # 12 significant digits: enough to reproduce every count, without
+                # last-digit noise from a changed aggregation plan churning the diff
+                writer.writerows([f"{v:.12g}" if isinstance(v, float) else v for v in row] for row in cur)
             print(f"wrote {out.relative_to(REPO_ROOT)} ({cur.rowcount} rows)")
 
 

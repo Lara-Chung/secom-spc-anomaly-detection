@@ -1,0 +1,16 @@
+{
+  "data_archive_sha256": "eea568baf3c2229096d7d294cf0b096b5502bd96d92c0b80a65b84714059be8e",
+  "python": "3.12.13",
+  "packages": {
+    "pandas": "3.1.0",
+    "numpy": "2.5.4",
+    "scikit-learn": "1.9.1",
+    "psycopg": "3.3.6"
+  },
+  "run_level_thresholds": {
+    "spc_frozen": 11.0,
+    "spc_rolling": 15.0
+  },
+  "threshold_source": "training-period score quantile at the training fail rate (outputs/metrics.csv)",
+  "case_selection": "spc_frozen on the test period; highest score per outcome group, ties by earliest (ts, run_id)"
+}

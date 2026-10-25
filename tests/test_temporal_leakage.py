@@ -7,6 +7,7 @@ loaded SECOM tables are untouched.
 from datetime import datetime, timedelta
 
 import numpy as np
+import pandas as pd
 import psycopg
 import pytest
 
@@ -55,6 +56,24 @@ def conn():
     c.close()
 
 
+def refresh(conn):
+    """The materialized views are snapshots; rebuild them after changing a base table,
+    in dependency order."""
+    for view in ("sensor_quality", "frozen_limits", "spc_run_scores"):
+        conn.execute(f"REFRESH MATERIALIZED VIEW {view}")
+
+
+def limits(conn):
+    rows = conn.execute("SELECT sensor_id, mean_train, std_train FROM frozen_limits ORDER BY sensor_id").fetchall()
+    return [r[0] for r in rows], np.array([r[1:] for r in rows], dtype=float)
+
+
+def assert_same_limits(before, after):
+    """Same sensors, and mean/std equal up to the re-aggregation order of a REFRESH."""
+    assert before[0] == after[0]
+    assert np.allclose(before[1], after[1], rtol=1e-12, atol=0)
+
+
 def rolling(conn):
     return conn.execute(
         "SELECT run_id, sensor_id, roll_mean, roll_std, roll_n, z, is_alert "
@@ -96,11 +115,73 @@ def test_insufficient_history_and_zero_variance_are_not_evaluated(conn):
 def test_changing_future_values_does_not_change_past_results(conn):
     before_rolling = rolling(conn)
     before_scores = run_scores(conn)
+    before_limits = limits(conn)
     conn.execute("UPDATE measurements SET value = value * 100 + 1000 WHERE run_id >= %s", (N_TRAIN,))
+    refresh(conn)
     after_rolling = rolling(conn)
     after_scores = run_scores(conn)
+    # The limits themselves must not move: alert counts alone could stay equal by chance
+    assert_same_limits(before_limits, limits(conn))
 
     assert [r for r in after_rolling if r[0] < N_TRAIN] == [r for r in before_rolling if r[0] < N_TRAIN]
     # Frozen limits come from the training period, so train-period scores are unchanged too
     assert after_scores[:N_TRAIN] == before_scores[:N_TRAIN]
     assert after_scores[N_TRAIN:] != before_scores[N_TRAIN:]  # the change did reach the test period
+
+
+def test_changing_labels_does_not_change_scores_or_evidence(conn):
+    """Outcome isolation: labels feed only the retrospective columns."""
+    from investigate_run import sensor_evidence
+    before_rolling = rolling(conn)
+    before_scores = run_scores(conn)
+    before_evidence = sensor_evidence(conn, N_TRAIN + 5, "spc_frozen")
+    before_limits = limits(conn)
+    conn.execute("UPDATE runs SET label = -label")  # every run, so train-derived limits are covered too
+    refresh(conn)
+    assert_same_limits(before_limits, limits(conn))
+    assert rolling(conn) == before_rolling
+    assert run_scores(conn) == before_scores
+    pd.testing.assert_frame_equal(sensor_evidence(conn, N_TRAIN + 5, "spc_frozen"), before_evidence)
+    # The flip did reach the outcome column
+    (n_fail,) = conn.execute("SELECT count(*) FROM run_split WHERE split = 'test' AND is_fail").fetchone()
+    assert n_fail == (N_RUNS - N_TRAIN) - sum(1 for i in range(N_TRAIN, N_RUNS) if i % 10 == 0)
+
+
+def test_runs_with_equal_timestamps_are_ordered_by_run_id(conn):
+    """Ties on ts are broken by run_id: the later run_id sees the earlier one, not vice versa.
+
+    This documents the rule rather than guarding it: without the run_id tie-break
+    PostgreSQL's sort order among equal ts values is unspecified, so the test
+    could still pass by chance.
+    """
+    conn.execute("UPDATE runs SET ts = (SELECT ts FROM runs WHERE run_id = 40) WHERE run_id = 41")
+    values = [r[0] for r in conn.execute("SELECT value FROM measurements WHERE sensor_id = 0 ORDER BY run_id")]
+    rows = {r[0]: r[1:] for r in conn.execute(
+        "SELECT run_id, roll_n, roll_mean FROM spc_rolling WHERE sensor_id = 0 AND run_id IN (40, 41)")}
+    assert rows[40][0] == 40 and rows[40][1] == pytest.approx(np.mean(values[:40]))  # runs 0..39
+    assert rows[41][0] == 41 and rows[41][1] == pytest.approx(np.mean(values[:41]))  # runs 0..40
+
+
+def test_single_run_evidence_keeps_history_and_matches_view_limits(conn):
+    """Filtering the evidence to one run must not shrink the history behind its band,
+    and the limits in the evidence must equal the ones the SPC views computed."""
+    from investigate_run import sensor_evidence
+    view = pd.DataFrame(
+        conn.execute("SELECT run_id, sensor_id, roll_mean, roll_std, roll_n, is_alert FROM spc_rolling").fetchall(),
+        columns=["run_id", "sensor_id", "roll_mean", "roll_std", "roll_n", "is_alert"],
+    ).set_index(["run_id", "sensor_id"])
+    for run_id, expected_history in [(30, 30), (55, 50)]:  # 50 = window size
+        ev = sensor_evidence(conn, run_id, "spc_rolling").set_index("sensor_id").loc[0]
+        v = view.loc[(run_id, 0)]
+        assert ev["history_count"] == expected_history == v["roll_n"]
+        assert ev["lower_limit"] == pytest.approx(v["roll_mean"] - 3 * v["roll_std"])
+        assert ev["upper_limit"] == pytest.approx(v["roll_mean"] + 3 * v["roll_std"])
+        assert bool(ev["is_sensor_alert"]) == bool(v["is_alert"])
+
+    train_values = [r[0] for r in conn.execute(
+        "SELECT value FROM measurements WHERE sensor_id = 0 AND run_id < %s ORDER BY run_id", (N_TRAIN,))]
+    mean, std = np.mean(train_values), np.std(train_values, ddof=1)
+    ev = sensor_evidence(conn, 50, "spc_frozen").set_index("sensor_id").loc[0]
+    assert ev["history_count"] == N_TRAIN
+    assert ev["lower_limit"] == pytest.approx(mean - 3 * std)
+    assert ev["upper_limit"] == pytest.approx(mean + 3 * std)
