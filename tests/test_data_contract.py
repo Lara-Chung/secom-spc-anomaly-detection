@@ -8,6 +8,7 @@ import pandas as pd
 import psycopg
 import pytest
 
+from conftest import skip_or_fail
 from db import connect
 from secom_data import FEATURES_FILE, LABELS_FILE, read_features, read_labels
 
@@ -20,11 +21,11 @@ def conn():
         # autocommit: a failing query in one test must not abort the shared session
         c = connect(autocommit=True)
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Cannot connect to PostgreSQL ({exc}); check `docker compose up -d --wait` and .env")
+        skip_or_fail(f"Cannot connect to PostgreSQL ({exc}); check `docker compose up -d --wait` and .env")
     missing = [t for t in TABLES if scalar(c, "SELECT to_regclass(%s)", (t,)) is None]
     if missing:
         c.close()
-        pytest.skip(f"Tables {missing} not found; run `uv run python src/load_database.py`")
+        skip_or_fail(f"Tables {missing} not found; run `uv run python src/load_database.py`")
     yield c
     c.close()
 
@@ -32,7 +33,7 @@ def conn():
 @pytest.fixture(scope="module")
 def raw():
     if not (FEATURES_FILE.exists() and LABELS_FILE.exists()):
-        pytest.skip("Raw files not found; run `uv run python src/download_or_prepare.py`")
+        skip_or_fail("Raw files not found; run `uv run python src/download_or_prepare.py`")
     return read_features(), read_labels()
 
 

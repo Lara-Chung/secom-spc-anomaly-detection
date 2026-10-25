@@ -10,6 +10,7 @@ import numpy as np
 import psycopg
 import pytest
 
+from conftest import skip_or_fail
 from db import connect
 from run_sql import SQL_DIR, create_views
 
@@ -23,7 +24,7 @@ def conn():
     try:
         c = connect(autocommit=True)
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Cannot connect to PostgreSQL ({exc})")
+        skip_or_fail(f"Cannot connect to PostgreSQL ({exc})")
     c.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
     c.execute(f"CREATE SCHEMA {SCHEMA}")
     c.execute(f"SET search_path TO {SCHEMA}")
