@@ -171,3 +171,7 @@ Not implemented: random stratified splits with multiple seeds, expanding-window 
 - `tests/test_evaluation.py`: score direction and label mapping, and training scores and thresholds do not depend on test-period features.
 
 `test_data_contract.py` needs the database running and loaded, `test_temporal_leakage.py` needs it running, and `test_evaluation.py` needs no database. Tests that cannot reach what they need skip with a message, except under `SECOM_TESTS_REQUIRE_DB=1` (set by `run_all.sh`), where they fail instead.
+
+## License
+
+Code in this repository is released under the MIT License (`LICENSE`). The SECOM dataset is licensed separately under CC BY 4.0 by its authors; see section 1.
