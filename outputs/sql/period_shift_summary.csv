@@ -1,0 +1,2 @@
+n_sensors,n_shift_gt_0_5_sd,n_shift_gt_1_sd,mean_alert_rate_train,mean_alert_rate_test,n_alert_rate_up,n_alert_rate_down,n_alert_rate_equal
+444,56,7,0.00977527858556953028,0.01208827297303478247,179,236,29

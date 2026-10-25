@@ -1,0 +1,7 @@
+comparison,ap_difference,ci_low,ci_high
+isolation_forest - spc_frozen,-0.0085,-0.0481,0.0151
+isolation_forest - spc_rolling,-0.0398,-0.1183,-0.004
+isolation_forest - logistic_regression,-0.0084,-0.0519,0.0479
+spc_frozen - spc_rolling,-0.0313,-0.1038,0.0104
+spc_frozen - logistic_regression,0.0,-0.0453,0.0724
+spc_rolling - logistic_regression,0.0313,-0.018,0.1362
